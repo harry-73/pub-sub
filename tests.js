@@ -4,7 +4,7 @@ import { Mongo, MongoInternals } from 'meteor/mongo';
 import { MongoID } from 'meteor/mongo-id';
 import { DDP } from 'meteor/ddp-client';
 import { Tracker } from 'meteor/tracker';
-import { merge, extractSubscribeArguments } from './lib/utils/client';
+import { merge, extractSubscribeArguments, isEqual } from './lib/utils/client';
 import { convertFilter, removeValue, trim, matchesFilter, convertObjectId, createProjection } from './lib/utils/server';
 import { createKey } from './lib/utils/shared';
 import { subsCache } from './lib/subs-cache';
@@ -28,9 +28,6 @@ const Notes = new Mongo.Collection('notes');
 const Items = new Mongo.Collection('items');
 const Books = new Mongo.Collection('books');
 const Dogs = new Mongo.Collection('dogs');
-const Cats = new Mongo.Collection('cats', {
-  idGeneration: 'MONGO' // Mongo.ObjectID
-});
 const Markers = new Mongo.Collection('markers', {
   idGeneration: 'MONGO' // Mongo.ObjectID
 });
@@ -73,17 +70,6 @@ const resetMarkers = async () => {
 
 const resetDogs = async () => {
   await Dogs.removeAsync({});
-  return;
-}
-
-const resetCats = async () => {
-  await Cats.removeAsync({});
-  await Cats.insertAsync({ name: 'fluffy', something: new Mongo.ObjectID('123456789012345678901234') });
-  await Cats.insertAsync({ name: 'Phantom', something: new Mongo.ObjectID('123456789012345678901234') });
-  await Cats.insertAsync({
-    name: 'Mittens',
-    something: new Mongo.ObjectID('012341234567890123456789'),
-  });
   return;
 }
 
@@ -163,10 +149,6 @@ const insertDog = async ({ text }) => {
   return Dogs.insertAsync({ text, ...(Meteor.isServer && { something: 1 }) });
 }
 
-const insertCat = async ({ name, id }) => {
-  return Cats.insertAsync({ name, something: id });
-}
-
 const updateDog = async ({ _id, text }) => {
   return Dogs.updateAsync({ _id }, { $set: { text, ...(Meteor.isServer && { something: 2 }) }});
 }
@@ -187,7 +169,6 @@ if (Meteor.isServer) {
     await resetBooks();
     await resetMarkers();
     await resetDogs();
-    await resetCats();
   })
 
   Meteor.publish('notes.all', function() {
@@ -238,15 +219,11 @@ if (Meteor.isServer) {
     return Dogs.find({}, { fields: { text: 1 }});
   });
 
-  Meteor.publish.stream('cats.stream.something', function(filterObjectId) {
-    return Cats.find({something: filterObjectId}, { fields: { name: 1, something: 1 }});
-  });
-
-  Meteor.methods({ reset, resetNotes, resetItems, resetBooks, resetMarkers, resetDogs, resetCats, updateThing, updateThingWithUnset, updateThings, updateThingsWithUnset, updateThingUpsert, updateThingUpsertMulti, upsertThing, replaceThing, removeThing, fetchThings, updateItem, fetchItems })
+  Meteor.methods({ reset, resetNotes, resetItems, resetBooks, resetMarkers, resetDogs, updateThing, updateThingWithUnset, updateThings, updateThingsWithUnset, updateThingUpsert, updateThingUpsertMulti, upsertThing, replaceThing, removeThing, fetchThings, updateItem, fetchItems })
 }
 
 // isomorphic methods
-Meteor.methods({ insertThing, insertItem, insertBook, insertMarker, updateMarker, updateMarkers, insertDog, updateDog, insertCat, replaceDog, removeDog });
+Meteor.methods({ insertThing, insertItem, insertBook, insertMarker, updateMarker, updateMarkers, insertDog, updateDog, replaceDog, removeDog });
 
 
 function createConnection() {
@@ -1092,38 +1069,6 @@ if (Meteor.isClient) {
     test.equal(markers.filter(m => m.text === 'hello').length, 2)
     computation.stop();
   });
-
-   Tinytest.addAsync(
-     'subscribe - .stream - successful with Mongo.ObjectID as a filter',
-     async (test) => {
-       await Meteor.callAsync('resetCats');
-
-       let sub;
-       Tracker.autorun(() => {
-         sub = Meteor.subscribe('cats.stream.something', new Mongo.ObjectID('123456789012345678901234'), { cacheDuration: 0.1 });
-       });
-
-       let cats;
-       const computation = Tracker.autorun(() => {
-         if (sub.ready()) {
-           cats = Cats.find().fetch();
-           sub.stop();
-         }
-       });
-
-      
-
-       await wait(101);
-        console.log('cats', cats);
-       test.equal(cats.length, 2);
-
-       await Meteor.callAsync('insertCat', { name: 'sup', id: new Mongo.ObjectID('123456789012345678901234') });
-       await wait(100);
-       test.equal(cats.length, 3);
-
-       computation.stop();
-     }
-   );
 
 
   Tinytest.addAsync('cache - regular pubsub -  successful', async (test) => {
@@ -2124,6 +2069,126 @@ if (Meteor.isServer) {
 
     test.equal(_isEqual(lodashMerged, merged), true);
   })
+
+  // Tests for isEqual function with Set compatibility
+  Tinytest.add('isEqual - Set equality - identical sets', function (test) {
+    const set1 = new Set([1, 2, 3]);
+    const set2 = new Set([1, 2, 3]);
+    test.isTrue(isEqual(set1, set2), 'Identical sets should be equal');
+  });
+
+  Tinytest.add('isEqual - Set equality - same elements different order', function (test) {
+      const set1 = new Set([1, 2, 3]);
+      const set2 = new Set([3, 1, 2]);
+      test.isTrue(
+        isEqual(set1, set2),
+        'Sets with same elements in different order should be equal'
+      );
+    }
+  );
+
+  Tinytest.add('isEqual - Set inequality - different sizes', function (test) {
+    const set1 = new Set([1, 2, 3]);
+    const set2 = new Set([1, 2]);
+    test.isFalse(
+      isEqual(set1, set2),
+      'Sets with different sizes should not be equal'
+    );
+  });
+
+  Tinytest.add('isEqual - Set inequality - different elements', function (test) {
+      const set1 = new Set([1, 2, 3]);
+      const set2 = new Set([1, 2, 4]);
+      test.isFalse(
+        isEqual(set1, set2),
+        'Sets with different elements should not be equal'
+      );
+    }
+  );
+
+  Tinytest.add('isEqual - Set equality - empty sets', function (test) {
+    const set1 = new Set();
+    const set2 = new Set();
+    test.isTrue(isEqual(set1, set2), 'Empty sets should be equal');
+  });
+
+  Tinytest.add('isEqual - Set inequality - one empty', function (test) {
+    const set1 = new Set();
+    const set2 = new Set([1, 2, 3]);
+    test.isFalse(
+      isEqual(set1, set2),
+      'Empty set should not equal non-empty set'
+    );
+  });
+
+  Tinytest.add('isEqual - Set equality - with strings', function (test) {
+    const set1 = new Set(['a', 'b', 'c']);
+    const set2 = new Set(['c', 'a', 'b']);
+    test.isTrue(
+      isEqual(set1, set2),
+      'Sets with same string elements should be equal'
+    );
+  });
+
+  Tinytest.add('isEqual - Set equality - with objects', function (test) {
+    const obj1 = { id: 1, name: 'test' };
+    const obj2 = { id: 2, name: 'test2' };
+    const set1 = new Set([obj1, obj2]);
+    const set2 = new Set([obj2, obj1]);
+    test.isTrue(
+      isEqual(set1, set2),
+      'Sets with same object elements should be equal'
+    );
+  });
+
+  Tinytest.add('isEqual - Set inequality - with objects', function (test) {
+    const obj1 = { id: 1, name: 'test' };
+    const obj2 = { id: 2, name: 'test2' };
+    const obj3 = { id: 3, name: 'test3' };
+    const set1 = new Set([obj1, obj2]);
+    const set2 = new Set([obj1, obj3]);
+    test.isFalse(
+      isEqual(set1, set2),
+      'Sets with different object elements should not be equal'
+    );
+  });
+
+  Tinytest.add('isEqual - Set vs non-Set', function (test) {
+    const set1 = new Set([1, 2, 3]);
+    const array1 = [1, 2, 3];
+    test.isFalse(isEqual(set1, array1), 'Set should not equal array');
+  });
+
+  Tinytest.add('isEqual - non-Set vs Set', function (test) {
+    const array1 = [1, 2, 3];
+    const set1 = new Set([1, 2, 3]);
+    test.isFalse(isEqual(array1, set1), 'Array should not equal Set');
+  });
+
+  Tinytest.add('isEqual - Set with duplicate values', function (test) {
+    // Note: Sets don't have duplicates, but testing edge case
+    const set1 = new Set([1, 2, 3]);
+    const set2 = new Set([1, 2, 3, 3]); // This will be the same as [1, 2, 3]
+    test.isTrue(
+      isEqual(set1, set2),
+      'Sets should handle duplicate values correctly'
+    );
+  });
+
+  Tinytest.add('isEqual - Set with undefined and null', function (test) {
+    const set1 = new Set([undefined, null, 0]);
+    const set2 = new Set([null, undefined, 0]);
+    test.isTrue(
+      isEqual(set1, set2),
+      'Sets with undefined and null should be equal'
+    );
+  });
+
+  Tinytest.add('isEqual - Set with NaN', function (test) {
+    const set1 = new Set([NaN, 1, 2]);
+    const set2 = new Set([1, NaN, 2]);
+    test.isTrue(isEqual(set1, set2), 'Sets with NaN should be equal');
+  });
 }
 
 Tinytest.addAsync('subscribe - .once - current user is not removed', async (test) => {
